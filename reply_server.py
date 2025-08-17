@@ -444,51 +444,18 @@ async def admin_page():
         return HTMLResponse(f.read())
 
 
-# 用户管理页面路由
-@app.get('/user_management.html', response_class=HTMLResponse)
-async def user_management_page():
-    page_path = os.path.join(static_dir, 'user_management.html')
-    if os.path.exists(page_path):
-        with open(page_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>User management page not found</h3>')
-
-
-# 日志管理页面路由
-@app.get('/log_management.html', response_class=HTMLResponse)
-async def log_management_page():
-    page_path = os.path.join(static_dir, 'log_management.html')
-    if os.path.exists(page_path):
-        with open(page_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Log management page not found</h3>')
-
-
-# 数据管理页面路由
-@app.get('/data_management.html', response_class=HTMLResponse)
-async def data_management_page():
-    page_path = os.path.join(static_dir, 'data_management.html')
-    if os.path.exists(page_path):
-        with open(page_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Data management page not found</h3>')
 
 
 
 
 
-# 商品搜索页面路由
-@app.get('/item_search.html', response_class=HTMLResponse)
-async def item_search_page():
-    page_path = os.path.join(static_dir, 'item_search.html')
-    if os.path.exists(page_path):
-        with open(page_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Item search page not found</h3>')
+
+
+
+
+
+
+
 
 
 # 登录接口
@@ -1535,7 +1502,32 @@ def get_registration_status():
         return {'enabled': True, 'message': '注册功能已开启'}  # 出错时默认开启
 
 
+@app.get('/login-info-status')
+def get_login_info_status():
+    """获取默认登录信息显示状态（公开接口，无需认证）"""
+    from db_manager import db_manager
+    try:
+        enabled_str = db_manager.get_system_setting('show_default_login_info')
+        logger.debug(f"从数据库获取的登录信息显示设置值: '{enabled_str}'")
+
+        # 如果设置不存在，默认为开启
+        if enabled_str is None:
+            enabled_bool = True
+        else:
+            enabled_bool = enabled_str == 'true'
+
+        return {"enabled": enabled_bool}
+    except Exception as e:
+        logger.error(f"获取登录信息显示状态失败: {e}")
+        # 出错时默认为开启
+        return {"enabled": True}
+
+
 class RegistrationSettingUpdate(BaseModel):
+    enabled: bool
+
+
+class LoginInfoSettingUpdate(BaseModel):
     enabled: bool
 
 
@@ -1565,6 +1557,31 @@ def update_registration_settings(setting_data: RegistrationSettingUpdate, admin_
         logger.error(f"更新注册设置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put('/login-info-settings')
+def update_login_info_settings(setting_data: LoginInfoSettingUpdate, admin_user: Dict[str, Any] = Depends(require_admin)):
+    """更新默认登录信息显示设置（仅管理员）"""
+    from db_manager import db_manager
+    try:
+        enabled = setting_data.enabled
+        success = db_manager.set_system_setting(
+            'show_default_login_info',
+            'true' if enabled else 'false',
+            '是否显示默认登录信息'
+        )
+        if success:
+            log_with_user('info', f"更新登录信息显示设置: {'开启' if enabled else '关闭'}", admin_user)
+            return {
+                'success': True,
+                'enabled': enabled,
+                'message': f"默认登录信息显示已{'开启' if enabled else '关闭'}"
+            }
+        else:
+            raise HTTPException(status_code=500, detail='更新登录信息显示设置失败')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新登录信息显示设置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -2742,7 +2759,11 @@ async def search_items(
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """搜索闲鱼商品"""
+    user_info = f"【{current_user.get('username', 'unknown')}#{current_user.get('user_id', 'unknown')}】" if current_user else "【未登录】"
+
     try:
+        logger.info(f"{user_info} 开始单页搜索: 关键词='{search_request.keyword}', 页码={search_request.page}, 每页={search_request.page_size}")
+
         from utils.item_search import search_xianyu_items
 
         # 执行搜索
@@ -2752,18 +2773,84 @@ async def search_items(
             page_size=search_request.page_size
         )
 
-        return {
+        # 检查是否有错误
+        has_error = result.get("error")
+        items_count = len(result.get("items", []))
+
+        logger.info(f"{user_info} 单页搜索完成: 获取到 {items_count} 条数据" +
+                   (f", 错误: {has_error}" if has_error else ""))
+
+        response_data = {
             "success": True,
             "data": result.get("items", []),
             "total": result.get("total", 0),
             "page": search_request.page,
             "page_size": search_request.page_size,
-            "keyword": search_request.keyword
+            "keyword": search_request.keyword,
+            "is_real_data": result.get("is_real_data", False),
+            "source": result.get("source", "unknown")
         }
-    except Exception as e:
-        logger.error(f"商品搜索失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"商品搜索失败: {str(e)}")
 
+        # 如果有错误信息，也包含在响应中
+        if has_error:
+            response_data["error"] = has_error
+
+        return response_data
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"{user_info} 商品搜索失败: {error_msg}")
+        raise HTTPException(status_code=500, detail=f"商品搜索失败: {error_msg}")
+
+
+@app.get("/cookies/check")
+async def check_valid_cookies(
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """检查是否有有效的cookies账户（必须是启用状态）"""
+    try:
+        if cookie_manager.manager is None:
+            return {
+                "success": True,
+                "hasValidCookies": False,
+                "validCount": 0,
+                "enabledCount": 0,
+                "totalCount": 0
+            }
+
+        from db_manager import db_manager
+
+        # 获取所有cookies
+        all_cookies = db_manager.get_all_cookies()
+
+        # 检查启用状态和有效性
+        valid_cookies = []
+        enabled_cookies = []
+
+        for cookie_id, cookie_value in all_cookies.items():
+            # 检查是否启用
+            is_enabled = cookie_manager.manager.get_cookie_status(cookie_id)
+            if is_enabled:
+                enabled_cookies.append(cookie_id)
+                # 检查是否有效（长度大于50）
+                if len(cookie_value) > 50:
+                    valid_cookies.append(cookie_id)
+
+        return {
+            "success": True,
+            "hasValidCookies": len(valid_cookies) > 0,
+            "validCount": len(valid_cookies),
+            "enabledCount": len(enabled_cookies),
+            "totalCount": len(all_cookies)
+        }
+
+    except Exception as e:
+        logger.error(f"检查cookies失败: {str(e)}")
+        return {
+            "success": False,
+            "hasValidCookies": False,
+            "error": str(e)
+        }
 
 @app.post("/items/search_multiple")
 async def search_multiple_pages(
@@ -2771,7 +2858,11 @@ async def search_multiple_pages(
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """搜索多页闲鱼商品"""
+    user_info = f"【{current_user.get('username', 'unknown')}#{current_user.get('user_id', 'unknown')}】" if current_user else "【未登录】"
+
     try:
+        logger.info(f"{user_info} 开始多页搜索: 关键词='{search_request.keyword}', 页数={search_request.total_pages}")
+
         from utils.item_search import search_multiple_pages_xianyu
 
         # 执行多页搜索
@@ -2780,7 +2871,14 @@ async def search_multiple_pages(
             total_pages=search_request.total_pages
         )
 
-        return {
+        # 检查是否有错误
+        has_error = result.get("error")
+        items_count = len(result.get("items", []))
+
+        logger.info(f"{user_info} 多页搜索完成: 获取到 {items_count} 条数据" +
+                   (f", 错误: {has_error}" if has_error else ""))
+
+        response_data = {
             "success": True,
             "data": result.get("items", []),
             "total": result.get("total", 0),
@@ -2790,36 +2888,18 @@ async def search_multiple_pages(
             "is_fallback": result.get("is_fallback", False),
             "source": result.get("source", "unknown")
         }
+
+        # 如果有错误信息，也包含在响应中
+        if has_error:
+            response_data["error"] = has_error
+
+        return response_data
+
     except Exception as e:
-        logger.error(f"多页商品搜索失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"多页商品搜索失败: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"{user_info} 多页商品搜索失败: {error_msg}")
+        raise HTTPException(status_code=500, detail=f"多页商品搜索失败: {error_msg}")
 
-
-@app.get("/items/detail/{item_id}")
-async def get_public_item_detail(
-    item_id: str,
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
-):
-    """获取公开商品详情（通过外部API）"""
-    try:
-        from utils.item_search import get_item_detail_from_api
-
-        # 从外部API获取商品详情
-        detail = await get_item_detail_from_api(item_id)
-
-        if detail:
-            return {
-                "success": True,
-                "data": detail
-            }
-        else:
-            raise HTTPException(status_code=404, detail="商品详情获取失败")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取商品详情失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"获取商品详情失败: {str(e)}")
 
 
 @app.get("/items/cookie/{cookie_id}")
@@ -3373,43 +3453,55 @@ def get_system_logs(admin_user: Dict[str, Any] = Depends(require_admin),
 
         # 查找日志文件
         log_files = glob.glob("logs/xianyu_*.log")
+        logger.info(f"找到日志文件: {log_files}")
+
         if not log_files:
-            return {"logs": [], "message": "未找到日志文件"}
+            logger.warning("未找到日志文件")
+            return {"logs": [], "message": "未找到日志文件", "success": False}
 
         # 获取最新的日志文件
         latest_log_file = max(log_files, key=os.path.getctime)
+        logger.info(f"使用最新日志文件: {latest_log_file}")
 
         logs = []
         try:
             with open(latest_log_file, 'r', encoding='utf-8') as f:
                 all_lines = f.readlines()
+                logger.info(f"读取到 {len(all_lines)} 行日志")
 
                 # 如果指定了日志级别，进行过滤
                 if level:
                     filtered_lines = [line for line in all_lines if f"| {level.upper()} |" in line]
+                    logger.info(f"按级别 {level} 过滤后剩余 {len(filtered_lines)} 行")
                 else:
                     filtered_lines = all_lines
 
                 # 获取最后N行
                 recent_lines = filtered_lines[-lines:] if len(filtered_lines) > lines else filtered_lines
+                logger.info(f"取最后 {len(recent_lines)} 行日志")
 
                 for line in recent_lines:
                     logs.append(line.strip())
 
         except Exception as e:
+            logger.error(f"读取日志文件失败: {str(e)}")
             log_with_user('error', f"读取日志文件失败: {str(e)}", admin_user)
-            return {"logs": [], "message": f"读取日志文件失败: {str(e)}"}
+            return {"logs": [], "message": f"读取日志文件失败: {str(e)}", "success": False}
 
         log_with_user('info', f"返回日志记录 {len(logs)} 条", admin_user)
+        logger.info(f"成功返回 {len(logs)} 条日志记录")
+
         return {
             "logs": logs,
             "log_file": latest_log_file,
-            "total_lines": len(logs)
+            "total_lines": len(logs),
+            "success": True
         }
 
     except Exception as e:
+        logger.error(f"获取系统日志失败: {str(e)}")
         log_with_user('error', f"获取系统日志失败: {str(e)}", admin_user)
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"logs": [], "message": f"获取系统日志失败: {str(e)}", "success": False}
 
 @app.get('/admin/stats')
 def get_system_stats(admin_user: Dict[str, Any] = Depends(require_admin)):
@@ -3851,7 +3943,7 @@ def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, A
             'users', 'cookies', 'cookie_status', 'keywords', 'default_replies', 'default_reply_records',
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
-            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders'
+            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders','item_replay'
         ]
 
         if table_name not in allowed_tables:
@@ -3933,6 +4025,26 @@ def update_item_multi_spec(cookie_id: str, item_id: str, spec_data: dict, _: Non
 
         if success:
             return {"message": f"商品多规格状态已{'开启' if is_multi_spec else '关闭'}"}
+        else:
+            raise HTTPException(status_code=404, detail="商品不存在")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 商品多数量发货管理API
+@app.put("/items/{cookie_id}/{item_id}/multi-quantity-delivery")
+def update_item_multi_quantity_delivery(cookie_id: str, item_id: str, delivery_data: dict, _: None = Depends(require_auth)):
+    """更新商品的多数量发货状态"""
+    try:
+        from db_manager import db_manager
+
+        multi_quantity_delivery = delivery_data.get('multi_quantity_delivery', False)
+
+        success = db_manager.update_item_multi_quantity_delivery_status(cookie_id, item_id, multi_quantity_delivery)
+
+        if success:
+            return {"message": f"商品多数量发货状态已{'开启' if multi_quantity_delivery else '关闭'}"}
         else:
             raise HTTPException(status_code=404, detail="商品不存在")
 
